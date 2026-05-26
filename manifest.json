@@ -12,8 +12,8 @@
         "changelog": "v1.7.0.0\n- Feature: Watched series — mark any series to automatically download new episodes from its latest season. Uses global default settings (language, provider, path). New Watched tab in the plugin UI with Watch/Watching toggle per series, manual check-now button, and a Jellyfin scheduled task that runs every 6 hours.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/ByQuadiix/Ani-Downloader/releases/download/v1.7.0.0/jellyfin-aniworld-downloader-v1.7.0.0.zip",
-        "checksum": "288a71c03812560d23f1efee89c47f55",
-        "timestamp": "2026-05-26T12:00:00Z"
+        "checksum": "1dc30e683042611d93b75757151b37b7",
+        "timestamp": "2026-05-26T13:00:00Z"
       },
       {
         "version": "1.6.0.0",

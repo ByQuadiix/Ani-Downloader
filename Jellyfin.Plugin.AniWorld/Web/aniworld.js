@@ -1284,6 +1284,8 @@ export default function (view, params) {
         checkWatchStatus: function (seriesUrl, seriesTitle) {
             var container = view.querySelector('#aw-watch-action');
             if (!container) return;
+            // Clear any existing button so repeated calls don't stack duplicates
+            container.innerHTML = '';
             var source = this.currentSeriesSource || 'aniworld';
             // HiAnime is not supported for watching (no clear "latest season" concept)
             if (source === 'hianime') return;
