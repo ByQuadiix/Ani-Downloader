@@ -15,10 +15,13 @@ jobs:
         with:
           ref: main
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "9.0.x"
+      - name: Setup .NET 9 SDK
+        run: |
+          wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh
+          chmod +x dotnet-install.sh
+          ./dotnet-install.sh --channel 9.0 --install-dir "$HOME/.dotnet"
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+          "$HOME/.dotnet/dotnet" --version
 
       - name: Build
         run: dotnet build Jellyfin.Plugin.AniWorld/Jellyfin.Plugin.AniWorld.csproj --configuration Release
