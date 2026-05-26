@@ -115,6 +115,7 @@ export default function (view, params) {
         aniWorldOnlyGerman: false,
 
         browseLoaded: { popular: false, new: false },
+        watchedLoaded: false,
 
         // ── Tab switching ──
         switchTab: function (tab) {
@@ -124,6 +125,7 @@ export default function (view, params) {
             view.querySelector('#browseTab').style.display = tab === 'browse' ? '' : 'none';
             view.querySelector('#downloadsTab').style.display = tab === 'downloads' ? '' : 'none';
             view.querySelector('#historyTab').style.display = tab === 'history' ? '' : 'none';
+            view.querySelector('#watchedTab').style.display = tab === 'watched' ? '' : 'none';
 
             if (tab === 'downloads') {
                 this.loadDownloads();
@@ -136,6 +138,10 @@ export default function (view, params) {
                 this.historyOffset = 0;
                 this.loadStats();
                 this.loadHistory(true);
+            }
+
+            if (tab === 'watched') {
+                this.loadWatched();
             }
 
             if (tab === 'search' && this.currentSeriesUrl) {
@@ -440,9 +446,15 @@ export default function (view, params) {
                 html += '</div>';
             }
 
+            // Watch action placeholder (populated asynchronously)
+            html += '<div id="aw-watch-action" style="margin-bottom:0.8em"></div>';
+
             html += '<div id="aw-season-bar"></div>';
             html += '<div id="aw-episodes"></div>';
             content.innerHTML = html;
+
+            // Async: check if already watched and render the button
+            AW.checkWatchStatus(seriesUrl, series.Title || '');
 
             if (series.Seasons && series.Seasons.length > 0) {
                 AW.loadSeason(encodeURIComponent(series.Seasons[0].Url));
@@ -1267,6 +1279,208 @@ export default function (view, params) {
             }
         },
 
+        // ── Watched series ──
+
+        checkWatchStatus: function (seriesUrl, seriesTitle) {
+            var container = view.querySelector('#aw-watch-action');
+            if (!container) return;
+            var source = this.currentSeriesSource || 'aniworld';
+            // HiAnime is not supported for watching (no clear "latest season" concept)
+            if (source === 'hianime') return;
+
+            // Show the button immediately in "Watch" state (not watching), then update async
+            var btn = document.createElement('button');
+            btn.className = 'aw-watch-toggle aw-watch-btn-inactive';
+            btn.innerHTML = '👁️ Watch';
+            btn.title = 'Add to watch list — new episodes in the latest season will be downloaded automatically';
+            btn.onclick = function () { AW.watchSeries(seriesUrl, seriesTitle, source); };
+            container.appendChild(btn);
+
+            // Async: refine state from server
+            ApiClient.fetch({
+                url: ApiClient.getUrl('AniWorld/Watched/IsWatched', { url: seriesUrl }),
+                type: 'GET',
+                dataType: 'json'
+            }).then(function (result) {
+                // Re-fetch the button in case the DOM changed while loading
+                var existingBtn = container.querySelector('.aw-watch-toggle');
+                if (!existingBtn) return;
+                if (result && result.watched) {
+                    existingBtn.className = 'aw-watch-toggle aw-watch-btn-active';
+                    existingBtn.innerHTML = '👁️ Watching';
+                    existingBtn.title = 'Remove from watch list';
+                    existingBtn.onclick = function () { AW.unwatchSeries(seriesUrl); };
+                }
+                // else: button already shows "Watch" — no change needed
+            }).catch(function () { /* server may not have endpoint yet — keep default "Watch" state */ });
+        },
+
+        watchSeries: function (seriesUrl, seriesTitle, source) {
+            ApiClient.fetch({
+                url: ApiClient.getUrl('AniWorld/Watched'),
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ seriesUrl: seriesUrl, seriesTitle: seriesTitle, source: source })
+            }).then(function () {
+                AW.checkWatchStatus(seriesUrl, seriesTitle);
+                AW.watchedLoaded = false;
+                AW.updateWatchedBadge();
+            }).catch(function (err) {
+                Dashboard.alert('Could not add to watch list: ' + (err.message || 'Unknown error'));
+            });
+        },
+
+        unwatchSeries: function (seriesUrl) {
+            // First get the ID for this URL
+            ApiClient.fetch({
+                url: ApiClient.getUrl('AniWorld/Watched'),
+                type: 'GET',
+                dataType: 'json'
+            }).then(function (list) {
+                var entry = list && list.find(function (w) { return w.SeriesUrl === seriesUrl; });
+                if (!entry) return;
+                ApiClient.fetch({
+                    url: ApiClient.getUrl('AniWorld/Watched/' + entry.Id),
+                    type: 'DELETE'
+                }).then(function () {
+                    AW.checkWatchStatus(seriesUrl, entry.SeriesTitle || '');
+                    AW.watchedLoaded = false;
+                    AW.updateWatchedBadge();
+                });
+            }).catch(function (err) {
+                Dashboard.alert('Could not remove from watch list: ' + (err.message || 'Unknown error'));
+            });
+        },
+
+        loadWatched: function () {
+            var container = view.querySelector('#aw-watched');
+            if (!container) return;
+
+            container.innerHTML = '<div class="aw-loading"><span class="aw-spinner"></span> Loading...</div>';
+
+            ApiClient.fetch({
+                url: ApiClient.getUrl('AniWorld/Watched'),
+                type: 'GET',
+                dataType: 'json'
+            }).then(function (list) {
+                AW.watchedLoaded = true;
+                AW.renderWatched(list);
+                AW.updateWatchedBadge(list ? list.length : 0);
+            }).catch(function () {
+                if (container) container.innerHTML = '<div class="aw-empty">Failed to load watch list.</div>';
+            });
+        },
+
+        renderWatched: function (list) {
+            var container = view.querySelector('#aw-watched');
+            if (!container) return;
+
+            if (!list || list.length === 0) {
+                container.innerHTML = '<div class="aw-empty"><div class="aw-empty-icon">👁️</div>No series on the watch list yet.<br>Open any series and click <strong>👁️ Watch</strong> to track new episodes automatically.</div>';
+                return;
+            }
+
+            var html = '<div class="aw-watched-header">';
+            html += '<h3>Watched Series (' + list.length + ')</h3>';
+            html += '<button class="aw-btn aw-btn-primary aw-btn-sm" onclick="window.AW.checkAllNow()">🔄 Check Now</button>';
+            html += '</div>';
+            html += '<div class="aw-watched-list">';
+
+            list.forEach(function (entry) {
+                var entrySource = entry.Source || 'aniworld';
+                html += '<div class="aw-watched-item">';
+                html += '<div class="aw-watched-info">';
+                html += '<strong>';
+                html += '<img class="aw-source-logo" src="' + siteLogoUrl(entrySource) + '" onerror="this.style.display=\'none\'" style="height:1em"> ';
+                html += esc(entry.SeriesTitle);
+                html += '</strong>';
+                var checkedText = entry.LastCheckedAt
+                    ? 'Last checked ' + formatDate(entry.LastCheckedAt)
+                    : 'Not checked yet';
+                html += '<small>' + esc(entrySource) + ' · Added ' + formatDate(entry.AddedAt) + ' · ' + checkedText + '</small>';
+                html += '</div>';
+                html += '<div class="aw-watched-actions">';
+                html += '<button class="aw-btn aw-btn-secondary aw-btn-sm" onclick="window.AW.showSeries(\'' + encodeURIComponent(entry.SeriesUrl) + '\', \'' + escJs(entry.SeriesTitle) + '\', \'' + escJs(entrySource) + '\')" title="Open series">🔍</button>';
+                html += '<button class="aw-btn aw-btn-primary aw-btn-sm" onclick="window.AW.checkOneNow(\'' + entry.Id + '\')" title="Check for new episodes now">🔄</button>';
+                html += '<button class="aw-btn aw-btn-danger aw-btn-sm" onclick="window.AW.removeWatchById(\'' + entry.Id + '\')" title="Remove from watch list">✕</button>';
+                html += '</div>';
+                html += '</div>';
+            });
+
+            html += '</div>';
+            container.innerHTML = html;
+        },
+
+        checkAllNow: function () {
+            var btn = view.querySelector('#aw-watched .aw-btn-primary');
+            if (btn) { btn.disabled = true; btn.textContent = '🔄 Checking...'; }
+
+            ApiClient.fetch({
+                url: ApiClient.getUrl('AniWorld/Watched/CheckNow'),
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({})
+            }).then(function (result) {
+                var msg = 'Check complete. Queued: ' + (result.queued || 0) + ', already downloaded: ' + (result.skipped || 0) + '.';
+                Dashboard.alert(msg);
+                AW.loadWatched();
+            }).catch(function (err) {
+                Dashboard.alert('Check failed: ' + (err.message || 'Unknown error'));
+                AW.loadWatched();
+            });
+        },
+
+        checkOneNow: function (watchId) {
+            ApiClient.fetch({
+                url: ApiClient.getUrl('AniWorld/Watched/CheckNow'),
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ watchId: watchId })
+            }).then(function (result) {
+                var msg = result.queued > 0
+                    ? result.queued + ' new episode(s) queued for download.'
+                    : 'No new episodes found.';
+                Dashboard.alert(msg);
+                AW.loadWatched();
+            }).catch(function (err) {
+                Dashboard.alert('Check failed: ' + (err.message || 'Unknown error'));
+            });
+        },
+
+        removeWatchById: function (watchId) {
+            ApiClient.fetch({
+                url: ApiClient.getUrl('AniWorld/Watched/' + watchId),
+                type: 'DELETE'
+            }).then(function () {
+                AW.watchedLoaded = false;
+                AW.loadWatched();
+            }).catch(function (err) {
+                Dashboard.alert('Could not remove: ' + (err.message || 'Unknown error'));
+            });
+        },
+
+        updateWatchedBadge: function (count) {
+            if (count === undefined) {
+                ApiClient.fetch({
+                    url: ApiClient.getUrl('AniWorld/Watched'),
+                    type: 'GET',
+                    dataType: 'json'
+                }).then(function (list) {
+                    AW.updateWatchedBadge(list ? list.length : 0);
+                }).catch(function () {});
+                return;
+            }
+            var badge = view.querySelector('#aw-watched-badge');
+            if (badge) {
+                if (count > 0) {
+                    badge.textContent = count;
+                    badge.style.display = '';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+        },
+
         goBack: function () {
             this.currentSeriesUrl = null;
             this.currentSeriesSource = null;
@@ -1307,6 +1521,9 @@ export default function (view, params) {
             }
         }
     }).catch(function () { /* ignore */ });
+
+    // Load initial watched badge count
+    AW.updateWatchedBadge();
 
     // Hide settings button when opened from sidebar (non-admin view)
     if (params && params.sidebar) {

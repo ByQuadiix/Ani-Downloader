@@ -29,6 +29,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<StoService>();
         serviceCollection.AddSingleton<HiAnimeService>();
         serviceCollection.AddSingleton<DownloadHistoryService>();
+        serviceCollection.AddSingleton<WatchedSeriesService>();
         serviceCollection.AddSingleton<DownloadService>();
         serviceCollection.AddSingleton<IStreamExtractor, VoeExtractor>();
         serviceCollection.AddSingleton<IStreamExtractor, VidozaExtractor>();

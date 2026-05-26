@@ -32,6 +32,7 @@ public class AniWorldController : ControllerBase
     private readonly HiAnimeService _hiAnimeService;
     private readonly DownloadService _downloadService;
     private readonly DownloadHistoryService _historyService;
+    private readonly WatchedSeriesService _watchedSeriesService;
     private readonly IServerConfigurationManager _configManager;
     private readonly ILogger<AniWorldController> _logger;
 
@@ -44,6 +45,7 @@ public class AniWorldController : ControllerBase
         HiAnimeService hiAnimeService,
         DownloadService downloadService,
         DownloadHistoryService historyService,
+        WatchedSeriesService watchedSeriesService,
         IServerConfigurationManager configManager,
         ILogger<AniWorldController> logger)
     {
@@ -52,6 +54,7 @@ public class AniWorldController : ControllerBase
         _hiAnimeService = hiAnimeService;
         _downloadService = downloadService;
         _historyService = historyService;
+        _watchedSeriesService = watchedSeriesService;
         _configManager = configManager;
         _logger = logger;
     }
@@ -1179,6 +1182,188 @@ public class AniWorldController : ControllerBase
         var removed = _historyService.CleanupOld(days);
         return Ok(new { removed });
     }
+
+    // ── Watched series ──────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns all series on the watch list.
+    /// </summary>
+    [HttpGet("Watched")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<List<Services.WatchedSeries>> GetWatchedSeries()
+    {
+        return Ok(_watchedSeriesService.GetAllWatched());
+    }
+
+    /// <summary>
+    /// Adds a series to the watch list.
+    /// </summary>
+    [HttpPost("Watched")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public ActionResult<Services.WatchedSeries> AddWatchedSeries([FromBody] WatchSeriesRequest request)
+    {
+        if (string.IsNullOrEmpty(request.SeriesUrl))
+        {
+            return BadRequest("SeriesUrl is required.");
+        }
+
+        if (!UrlValidator.IsValidUrl(request.SeriesUrl))
+        {
+            return BadRequest("Invalid URL. Only https://aniworld.to and https://s.to URLs are accepted.");
+        }
+
+        var source = ResolveSource(request.Source, request.SeriesUrl);
+        var entry = _watchedSeriesService.AddWatch(request.SeriesUrl, request.SeriesTitle ?? "Unknown", source);
+
+        if (entry == null)
+        {
+            return Conflict(new { message = "This series is already on the watch list." });
+        }
+
+        return Ok(entry);
+    }
+
+    /// <summary>
+    /// Removes a series from the watch list.
+    /// </summary>
+    [HttpDelete("Watched/{id}")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult RemoveWatchedSeries(string id)
+    {
+        if (_watchedSeriesService.RemoveWatch(id))
+        {
+            return Ok(new { success = true });
+        }
+
+        return NotFound();
+    }
+
+    /// <summary>
+    /// Checks whether a specific series URL is already on the watch list.
+    /// </summary>
+    [HttpGet("Watched/IsWatched")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<object> IsSeriesWatched([Required] string url)
+    {
+        return Ok(new { watched = _watchedSeriesService.IsWatched(url) });
+    }
+
+    /// <summary>
+    /// Immediately triggers a watch check for all watched series (or a single one by ID).
+    /// </summary>
+    [HttpPost("Watched/CheckNow")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<ActionResult<object>> CheckWatchedNow(
+        [FromBody] CheckNowRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var config = Plugin.Instance?.Configuration;
+        if (config?.MaintenanceMode == true)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, config.MaintenanceMessage);
+        }
+
+        var allWatched = _watchedSeriesService.GetAllWatched();
+
+        if (!string.IsNullOrEmpty(request?.WatchId))
+        {
+            allWatched = allWatched.Where(w => w.Id == request.WatchId).ToList();
+            if (allWatched.Count == 0)
+            {
+                return NotFound();
+            }
+        }
+
+        if (allWatched.Count == 0)
+        {
+            return Ok(new { queued = 0, skipped = 0, message = "No watched series." });
+        }
+
+        var totalQueued = 0;
+        var totalSkipped = 0;
+
+        foreach (var entry in allWatched)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            try
+            {
+                var source = entry.Source;
+                StreamingSiteService service = string.Equals(source, "sto", StringComparison.OrdinalIgnoreCase)
+                    ? _stoService
+                    : _aniWorldService;
+
+                var seriesInfo = await service.GetSeriesInfoAsync(entry.SeriesUrl, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (seriesInfo.Seasons == null || seriesInfo.Seasons.Count == 0)
+                {
+                    continue;
+                }
+
+                var latestSeason = seriesInfo.Seasons
+                    .Where(s => s.Number > 0)
+                    .OrderByDescending(s => s.Number)
+                    .FirstOrDefault();
+
+                if (latestSeason == null)
+                {
+                    continue;
+                }
+
+                var language = config!.GetPreferredLanguage(source);
+                var provider = config.GetPreferredProvider(source);
+                var basePath = config.GetDownloadPath(source, language);
+
+                if (string.IsNullOrEmpty(basePath))
+                {
+                    continue;
+                }
+
+                var seriesTitle = Helpers.PathHelper.SanitizeFileName(seriesInfo.Title ?? entry.SeriesTitle);
+                var episodes = await service.GetEpisodesAsync(latestSeason.Url, cancellationToken)
+                    .ConfigureAwait(false);
+
+                foreach (var ep in episodes)
+                {
+                    var (season, episode) = Helpers.PathHelper.ParseSeasonEpisode(ep.Url, ep.Number > 0 ? ep.Number : null);
+                    var outputPath = Helpers.PathHelper.BuildOutputPath(basePath, seriesTitle, ep.Url, ep.Number > 0 ? ep.Number : null);
+
+                    if (_downloadService.IsAlreadyDownloaded(seriesTitle, season, episode, language))
+                    {
+                        totalSkipped++;
+                        continue;
+                    }
+
+                    var taskId = await _downloadService.StartDownloadAsync(
+                        ep.Url, language, provider, outputPath, seriesTitle, source, cancellationToken)
+                        .ConfigureAwait(false);
+
+                    if (taskId != null) totalQueued++;
+                    else totalSkipped++;
+                }
+
+                var updatedCounts = new Dictionary<int, int>(entry.KnownEpisodeCounts)
+                {
+                    [latestSeason.Number] = episodes.Count,
+                };
+                _watchedSeriesService.UpdateAfterCheck(entry.Id, updatedCounts);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "CheckNow: error checking '{Title}'", entry.SeriesTitle);
+            }
+        }
+
+        return Ok(new { queued = totalQueued, skipped = totalSkipped });
+    }
 }
 
 /// <summary>
@@ -1254,6 +1439,30 @@ public class BatchDownloadRequest
 
     /// <summary>Gets or sets whether to force re-download of episodes already marked as downloaded.</summary>
     public bool Force { get; set; }
+}
+
+/// <summary>
+/// Request model for adding a series to the watch list.
+/// </summary>
+public class WatchSeriesRequest
+{
+    /// <summary>Gets or sets the series page URL.</summary>
+    public string SeriesUrl { get; set; } = string.Empty;
+
+    /// <summary>Gets or sets the display title (used for the watch list entry).</summary>
+    public string? SeriesTitle { get; set; }
+
+    /// <summary>Gets or sets the source site ("aniworld" or "sto").</summary>
+    public string? Source { get; set; }
+}
+
+/// <summary>
+/// Optional body for the CheckNow endpoint (can be empty to check all watched series).
+/// </summary>
+public class CheckNowRequest
+{
+    /// <summary>Gets or sets the watch entry ID to check only a single series. Leave empty to check all.</summary>
+    public string? WatchId { get; set; }
 }
 
 /// <summary>
