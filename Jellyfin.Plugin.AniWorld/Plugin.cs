@@ -131,6 +131,32 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     }
 
     /// <summary>
+    /// Attempts to unregister with the File Transformation plugin.
+    /// </summary>
+    private void TryUnregisterFileTransformation()
+    {
+        try
+        {
+            Assembly? fileTransformationAssembly =
+                AssemblyLoadContext.All.SelectMany(x => x.Assemblies).FirstOrDefault(x =>
+                    x.FullName?.Contains(".FileTransformation") ?? false);
+
+            if (fileTransformationAssembly == null)
+            {
+                return;
+            }
+
+            Type? pluginInterfaceType = fileTransformationAssembly.GetType("Jellyfin.Plugin.FileTransformation.PluginInterface");
+            pluginInterfaceType?.GetMethod("RemoveTransformation", new[] { typeof(Guid) })?
+                .Invoke(null, new object[] { Guid.Parse(PluginGuid) });
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    /// <summary>
     /// Injects the script tag into index.html directly.
     /// </summary>
     public void InjectScript()
@@ -139,10 +165,11 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     }
 
     /// <summary>
-    /// Removes any injected script from index.html.
+    /// Removes any injected script from index.html and unregisters transformations.
     /// </summary>
     public void CleanupInjection()
     {
+        TryUnregisterFileTransformation();
         UpdateIndexHtml(false);
     }
 
@@ -157,25 +184,14 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
             }
 
             var content = File.ReadAllText(indexPath);
-            var scriptTag = $"<script plugin=\"{PluginDisplayName}\" src=\"../AniWorld/InjectionScript\" defer></script>";
-            var regex = new Regex($"<script[^>]*plugin=[\"']{Regex.Escape(PluginDisplayName)}[\"'][^>]*>\\s*</script>\\n?");
+            var updatedContent = inject
+                ? TransformationPatches.IndexHtml(new PatchRequestPayload { Contents = content })
+                : TransformationPatches.RemoveScript(content);
 
-            // Remove existing script tag first
-            content = regex.Replace(content, string.Empty);
-
-            if (inject)
+            if (content != updatedContent)
             {
-                if (content.Contains("</body>"))
-                {
-                    content = content.Replace("</body>", $"{scriptTag}\n</body>");
-                }
-                else
-                {
-                    return;
-                }
+                File.WriteAllText(indexPath, updatedContent);
             }
-
-            File.WriteAllText(indexPath, content);
         }
         catch
         {

@@ -10,3 +10,6 @@ packages/
 .idea/
 /build/
 /publish/
+release/
+release-tmp/
+*.zip

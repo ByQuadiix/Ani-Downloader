@@ -8,6 +8,7 @@ namespace Jellyfin.Plugin.AniWorld.Helpers;
 public static class TransformationPatches
 {
     private const string PluginName = "AniWorld Downloader";
+    private const string ScriptSrc = "../AniWorld/InjectionScript";
 
     /// <summary>
     /// Patches index.html to inject the AniWorld sidebar script.
@@ -19,16 +20,16 @@ public static class TransformationPatches
             return content.Contents ?? string.Empty;
         }
 
-        var scriptTag = $"<script plugin=\"{PluginName}\" src=\"../AniWorld/InjectionScript\" defer></script>";
+        var scriptTag = $"<script plugin=\"{PluginName}\" src=\"{ScriptSrc}\" defer></script>";
 
-        // Remove any existing AniWorld script tags (idempotent)
-        var regex = new Regex($"<script[^>]*plugin=[\"']{Regex.Escape(PluginName)}[\"'][^>]*>\\s*</script>\\n?");
-        var updatedContent = regex.Replace(content.Contents, string.Empty);
+        // Remove any existing AniWorld script tags (idempotent, handles varying attribute order/spacing)
+        var updatedContent = RemoveScript(content.Contents);
 
         // Inject before </body>
-        if (updatedContent.Contains("</body>"))
+        if (updatedContent.Contains("</body>", StringComparison.OrdinalIgnoreCase))
         {
-            return updatedContent.Replace("</body>", $"{scriptTag}\n</body>");
+            var bodyIndex = updatedContent.IndexOf("</body>", StringComparison.OrdinalIgnoreCase);
+            return updatedContent.Insert(bodyIndex, $"{scriptTag}\n");
         }
 
         return updatedContent;
@@ -44,7 +45,11 @@ public static class TransformationPatches
             return content ?? string.Empty;
         }
 
-        var regex = new Regex($"<script[^>]*plugin=[\"']{Regex.Escape(PluginName)}[\"'][^>]*>\\s*</script>\\n?");
+        // Matches by plugin name attribute or by the AniWorld InjectionScript src path
+        var regex = new Regex(
+            $"<script[^>]*(?:plugin=[\"']{Regex.Escape(PluginName)}[\"']|src=[\"'][^\"']*{Regex.Escape(ScriptSrc)}[\"'])[^>]*>\\s*</script>\\n?",
+            RegexOptions.IgnoreCase);
+
         return regex.Replace(content, string.Empty);
     }
 }
